@@ -79,9 +79,7 @@ class ObjectArgumentValue : IConfigurationArgumentValue
             if (toType.GetConstructor(Type.EmptyTypes) == null)
                 return false;
 
-            // https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/object-and-collection-initializers#collection-initializers
-            var addMethod = toType.GetMethods().FirstOrDefault(m => !m.IsStatic && m.Name == "Add" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == elementType);
-            if (addMethod == null)
+            if (!HasAddMethod(toType, elementType, out var addMethod))
                 return false;
 
             var configurationElements = _section.GetChildren().ToArray();
@@ -203,7 +201,42 @@ class ObjectArgumentValue : IConfigurationArgumentValue
                 }
                 else if (s.GetChildren().Any())
                 {
-                    if (TryBuildCtorExpression(s, type, resolutionContext, out var ctorExpression))
+                    var elementType = type.GetElementType();
+                    if (elementType is not null)
+                    {
+                        var elements = new List<Expression>();
+                        foreach (var element in s.GetChildren())
+                        {
+                            if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
+                            {
+                                elements.Add(elementExpression);
+                            }
+                            else
+                            {
+                                return false;
+                            }
+                        }
+                        argumentExpression = Expression.NewArrayInit(elementType, elements);
+                        return true;
+                    }
+                    else if (IsContainer(type, out elementType) && type.GetConstructor(Type.EmptyTypes) is not null && HasAddMethod(type, elementType, out var addMethod))
+                    {
+                        var elements = new List<Expression>();
+                        foreach (var element in s.GetChildren())
+                        {
+                            if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
+                            {
+                                elements.Add(elementExpression);
+                            }
+                            else
+                            {
+                                return false;
+                            }
+                        }
+                        argumentExpression = Expression.ListInit(Expression.New(type), addMethod, elements);
+                        return true;
+                    }
+                    else if (TryBuildCtorExpression(s, type, resolutionContext, out var ctorExpression))
                     {
                         argumentExpression = ctorExpression;
                         return true;
@@ -234,5 +267,12 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         }
 
         return false;
+    }
+
+    static bool HasAddMethod(Type type, Type elementType, [NotNullWhen(true)] out MethodInfo? addMethod)
+    {
+        // https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/object-and-collection-initializers#collection-initializers
+        addMethod = type.GetMethods().FirstOrDefault(m => !m.IsStatic && m.Name == "Add" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == elementType);
+        return addMethod is not null;
     }
 }

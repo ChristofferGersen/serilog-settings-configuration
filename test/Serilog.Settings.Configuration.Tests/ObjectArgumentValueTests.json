@@ -40,5 +40,31 @@
   "case_6": {
     "a": 3,
     "b": 4
+  },
+
+  "case_7": {
+    "strings": [ "1", "2" ]
+  },
+
+  "case_8": {
+    "array": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9": {
+    "collection": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
   }
 }
