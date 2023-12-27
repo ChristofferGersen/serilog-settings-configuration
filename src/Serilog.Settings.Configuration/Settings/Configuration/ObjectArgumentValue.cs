@@ -256,7 +256,7 @@ class ObjectArgumentValue : IConfigurationArgumentValue
                         argumentExpression = Expression.NewArrayInit(elementType, elements);
                         return true;
                     }
-                    if (TryBuildCtorExpression(s, type, resolutionContext, out var ctorExpression))
+                    if (TryBuildCtorExpression(s, resolutionContext, out var ctorExpression) || TryBuildCtorExpression(s, type, resolutionContext, out ctorExpression))
                     {
                         if (ctorExpression.Type.IsValueType && !type.IsValueType)
                         {
