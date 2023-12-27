@@ -58,6 +58,42 @@
   },
 
   "case_9": {
+    "concrete": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_enumerable": {
+    "enumerable": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_enumerable_explicit_struct_implementation": {
+    "enumerable": {
+      "type": "System.ArraySegment`1[[Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+C, Serilog.Settings.Configuration.Tests]]",
+      "array": [
+        {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+        },
+        {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+        }
+      ]
+    }
+  },
+
+  "case_9_collection": {
     "collection": [
       {
         "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
@@ -66,5 +102,110 @@
         "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
       }
     ]
+  },
+
+  "case_9_readOnlyCollection": {
+    "readOnlyCollection": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_list": {
+    "list": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_readOnlyList": {
+    "readOnlyList": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_set": {
+    "set": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_readOnlySet": {
+    "readOnlySet": [
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    ]
+  },
+
+  "case_9_dictionary": {
+    "dictionary": {
+      "a": {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      "b": {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    }
+  },
+
+  "case_9_readOnlyDictionary": {
+    "readOnlyDictionary": {
+      "a": {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+      },
+      "b": {
+        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+      }
+    }
+  },
+
+  "case_9_dictionary_explicit_implementation": {
+    "dictionary": {
+      "type": "System.Collections.Generic.SortedDictionary`2[[System.String],[Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+C, Serilog.Settings.Configuration.Tests]], System.Collections",
+      "dictionary": {
+        "a": {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+        },
+        "b": {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+        }
+      }
+    }
+  },
+
+  "case_9_dictionary_explicit_implementation_net_framework": {
+    "dictionary": {
+      "type": "System.Collections.Generic.SortedDictionary`2[[System.String],[Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+C, Serilog.Settings.Configuration.Tests]], System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+      "dictionary": {
+        "a": {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+D, Serilog.Settings.Configuration.Tests"
+        },
+        "b": {
+          "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+I, Serilog.Settings.Configuration.Tests"
+        }
+      }
+    }
   }
 }

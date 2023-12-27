@@ -46,13 +46,16 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         if (toType.IsArray)
             return CreateArray();
 
+        // Only build ctor expression when type is explicitly specified in _section
+        if (TryBuildCtorExpression(_section, resolutionContext, out var ctorExpression))
+            return RunCtorExpression(ctorExpression);
+
         if (IsContainer(toType, out var elementType) && TryCreateContainer(out var container))
             return container;
 
-        if (TryBuildCtorExpression(_section, toType, resolutionContext, out var ctorExpression))
-        {
-            return Expression.Lambda<Func<object>>(ctorExpression).Compile().Invoke();
-        }
+        // Without a type explicitly specified, attempt to create ctor expression of toType
+        if (TryBuildCtorExpression(_section, toType, resolutionContext, out ctorExpression))
+            return RunCtorExpression(ctorExpression);
 
         // MS Config binding can work with a limited set of primitive types and collections
         return _section.Get(toType);
@@ -76,31 +79,46 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         {
             result = null;
 
-            if (toType.GetConstructor(Type.EmptyTypes) == null)
-                return false;
-
-            if (!HasAddMethod(toType, elementType, out var addMethod))
-                return false;
-
-            var configurationElements = _section.GetChildren().ToArray();
-            result = Activator.CreateInstance(toType) ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for {toType}");
-
-            for (int i = 0; i < configurationElements.Length; ++i)
+            if (IsConstructableDictionary(toType, elementType, out var concreteType, out var addMethod))
             {
-                var argumentValue = ConfigurationReader.GetArgumentValue(configurationElements[i], _configurationAssemblies);
-                var value = argumentValue.ConvertTo(elementType, resolutionContext);
-                addMethod.Invoke(result, new[] { value });
-            }
+                result = Activator.CreateInstance(concreteType) ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for {concreteType}");
 
-            return true;
+                foreach (var section in _section.GetChildren())
+                {
+                    var argumentValue = ConfigurationReader.GetArgumentValue(section, _configurationAssemblies);
+                    var value = argumentValue.ConvertTo(elementType, resolutionContext);
+                    addMethod.Invoke(result, new[] { section.Key, value });
+                }
+                return true;
+            }
+            else if (IsConstructableContainer(toType, elementType, out concreteType, out addMethod))
+            {
+                result = Activator.CreateInstance(concreteType) ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for {concreteType}");
+
+                foreach (var section in _section.GetChildren())
+                {
+                    var argumentValue = ConfigurationReader.GetArgumentValue(section, _configurationAssemblies);
+                    var value = argumentValue.ConvertTo(elementType, resolutionContext);
+                    addMethod.Invoke(result, new[] { value });
+                }
+                return true;
+            }
+            else
+            {
+                return false;
+            }
         }
     }
 
-    internal static bool TryBuildCtorExpression(
-        IConfigurationSection section, Type parameterType, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    static object RunCtorExpression(NewExpression ctorExpression)
     {
-        ctorExpression = null;
+        Expression body = ctorExpression.Type.IsValueType ? Expression.Convert(ctorExpression, typeof(object)) : ctorExpression;
+        return Expression.Lambda<Func<object>>(body).Compile().Invoke();
+    }
 
+    internal static bool TryBuildCtorExpression(
+        IConfigurationSection section, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    {
         var typeDirective = section.GetValue<string>("$type") switch
         {
             not null => "$type",
@@ -114,16 +132,35 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         var type = typeDirective switch
         {
             not null => Type.GetType(section.GetValue<string>(typeDirective)!, throwOnError: false),
-            null => parameterType,
+            null => null,
         };
 
         if (type is null or { IsAbstract: true })
         {
+            ctorExpression = null;
             return false;
         }
+        else
+        {
+            var suppliedArguments = section.GetChildren().Where(s => s.Key != typeDirective)
+                .ToDictionary(s => s.Key, StringComparer.OrdinalIgnoreCase);
+            return TryBuildCtorExpression(type, suppliedArguments, resolutionContext, out ctorExpression);
+        }
 
-        var suppliedArguments = section.GetChildren().Where(s => s.Key != typeDirective)
+    }
+
+    internal static bool TryBuildCtorExpression(
+        IConfigurationSection section, Type parameterType, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    {
+        var suppliedArguments = section.GetChildren()
             .ToDictionary(s => s.Key, StringComparer.OrdinalIgnoreCase);
+        return TryBuildCtorExpression(parameterType, suppliedArguments, resolutionContext, out ctorExpression);
+    }
+
+    static bool TryBuildCtorExpression(
+        Type type, Dictionary<string, IConfigurationSection> suppliedArguments, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    {
+        ctorExpression = null;
 
         if (suppliedArguments.Count == 0 &&
             type.GetConstructor(Type.EmptyTypes) is ConstructorInfo parameterlessCtor)
@@ -219,27 +256,53 @@ class ObjectArgumentValue : IConfigurationArgumentValue
                         argumentExpression = Expression.NewArrayInit(elementType, elements);
                         return true;
                     }
-                    else if (IsContainer(type, out elementType) && type.GetConstructor(Type.EmptyTypes) is not null && HasAddMethod(type, elementType, out var addMethod))
+                    if (TryBuildCtorExpression(s, type, resolutionContext, out var ctorExpression))
                     {
-                        var elements = new List<Expression>();
-                        foreach (var element in s.GetChildren())
+                        if (ctorExpression.Type.IsValueType && !type.IsValueType)
                         {
-                            if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
-                            {
-                                elements.Add(elementExpression);
-                            }
-                            else
-                            {
-                                return false;
-                            }
+                            argumentExpression = Expression.Convert(ctorExpression, type);
                         }
-                        argumentExpression = Expression.ListInit(Expression.New(type), addMethod, elements);
+                        else {
+                            argumentExpression = ctorExpression;
+                        }
                         return true;
                     }
-                    else if (TryBuildCtorExpression(s, type, resolutionContext, out var ctorExpression))
+                    if (IsContainer(type, out elementType))
                     {
-                        argumentExpression = ctorExpression;
-                        return true;
+                        if (IsConstructableDictionary(type, elementType, out var concreteType, out var addMethod))
+                        {
+                            var elements = new List<ElementInit>();
+                            foreach (var element in s.GetChildren())
+                            {
+                                if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
+                                {
+                                    elements.Add(Expression.ElementInit(addMethod, Expression.Constant(element.Key), elementExpression));
+                                }
+                                else
+                                {
+                                    return false;
+                                }
+                            }
+                            argumentExpression = Expression.ListInit(Expression.New(concreteType), elements);
+                            return true;
+                        }
+                        if (IsConstructableContainer(type, elementType, out concreteType, out addMethod))
+                        {
+                            var elements = new List<Expression>();
+                            foreach (var element in s.GetChildren())
+                            {
+                                if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
+                                {
+                                    elements.Add(elementExpression);
+                                }
+                                else
+                                {
+                                    return false;
+                                }
+                            }
+                            argumentExpression = Expression.ListInit(Expression.New(concreteType), addMethod, elements);
+                            return true;
+                        }
                     }
 
                     return false;
@@ -254,6 +317,11 @@ class ObjectArgumentValue : IConfigurationArgumentValue
     static bool IsContainer(Type type, [NotNullWhen(true)] out Type? elementType)
     {
         elementType = null;
+        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+        {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
         foreach (var iface in type.GetInterfaces())
         {
             if (iface.IsGenericType)
@@ -269,10 +337,92 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         return false;
     }
 
-    static bool HasAddMethod(Type type, Type elementType, [NotNullWhen(true)] out MethodInfo? addMethod)
+    static bool IsConstructableDictionary(Type type, Type elementType, [NotNullWhen(true)] out Type? concreteType, [NotNullWhen(true)] out MethodInfo? addMethod)
     {
-        // https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/object-and-collection-initializers#collection-initializers
-        addMethod = type.GetMethods().FirstOrDefault(m => !m.IsStatic && m.Name == "Add" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == elementType);
-        return addMethod is not null;
+        concreteType = null;
+        addMethod = null;
+        if (!elementType.IsGenericType || elementType.GetGenericTypeDefinition() != typeof(KeyValuePair<,>))
+        {
+            return false;
+        }
+        var argumentTypes = elementType.GetGenericArguments();
+        if (argumentTypes[0] != typeof(string))
+        {
+            return false;
+        }
+        if (!typeof(IDictionary<,>).MakeGenericType(argumentTypes).IsAssignableFrom(type)
+            && !typeof(IReadOnlyDictionary<,>).MakeGenericType(argumentTypes).IsAssignableFrom(type))
+        {
+            return false;
+        }
+        if (type.IsAbstract)
+        {
+            concreteType = typeof(Dictionary<,>).MakeGenericType(argumentTypes);
+            if (!type.IsAssignableFrom(concreteType))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            concreteType = type;
+        }
+        if (concreteType.GetConstructor(Type.EmptyTypes) == null)
+        {
+            return false;
+        }
+        var valueType = argumentTypes[1];
+        foreach (var method in concreteType.GetMethods())
+        {
+            if (!method.IsStatic && method.Name == "Add")
+            {
+                var parameters = method.GetParameters();
+                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string) && parameters[1].ParameterType == valueType)
+                {
+                    addMethod = method;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static bool IsConstructableContainer(Type type, Type elementType, [NotNullWhen(true)] out Type? concreteType, [NotNullWhen(true)] out MethodInfo? addMethod)
+    {
+        addMethod = null;
+        if (type.IsAbstract)
+        {
+            concreteType = typeof(List<>).MakeGenericType(elementType);
+            if (!type.IsAssignableFrom(concreteType))
+            {
+                concreteType = typeof(HashSet<>).MakeGenericType(elementType);
+                if (!type.IsAssignableFrom(concreteType))
+                {
+                    concreteType = null;
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            concreteType = type;
+        }
+        if (concreteType.GetConstructor(Type.EmptyTypes) == null)
+        {
+            return false;
+        }
+        foreach (var method in concreteType.GetMethods())
+        {
+            if (!method.IsStatic && method.Name == "Add")
+            {
+                var parameters = method.GetParameters();
+                if (parameters.Length == 1 && parameters[0].ParameterType == elementType)
+                {
+                    addMethod = method;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

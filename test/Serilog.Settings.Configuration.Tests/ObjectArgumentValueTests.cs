@@ -38,16 +38,161 @@ public class ObjectArgumentValueTests
     }
 
     [Fact]
-    public void ShouldBindToConstructorContainerArguments()
+    public void ShouldBindToConstructorConcreteContainerArguments()
     {
         var testSection = _config.GetSection("case_9");
 
         Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
         var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<J<C>>(instance.Collection);
+        Assert.IsType<J<C>>(instance.Concrete);
+        Assert.Collection(instance.Concrete,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorEnumerableArguments()
+    {
+        var testSection = _config.GetSection("case_9_enumerable");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<List<C>>(instance.Enumerable);
+        Assert.Collection(instance.Enumerable,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorEnumerableArgumentsWithExplicitStructImplementation()
+    {
+        var testSection = _config.GetSection("case_9_enumerable_explicit_struct_implementation");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<ArraySegment<C>>(instance.Enumerable);
+        Assert.Collection(instance.Enumerable,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorCollectionArguments()
+    {
+        var testSection = _config.GetSection("case_9_collection");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<List<C>>(instance.Collection);
         Assert.Collection(instance.Collection,
             first => Assert.IsType<D>(first),
             second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorReadOnlyCollectionArguments()
+    {
+        var testSection = _config.GetSection("case_9_readOnlyCollection");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<List<C>>(instance.ReadOnlyCollection);
+        Assert.Collection(instance.ReadOnlyCollection,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorListArguments()
+    {
+        var testSection = _config.GetSection("case_9_list");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<List<C>>(instance.List);
+        Assert.Collection(instance.List,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorReadOnlyListArguments()
+    {
+        var testSection = _config.GetSection("case_9_readOnlyList");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        Assert.IsType<List<C>>(instance.ReadOnlyList);
+        Assert.Collection(instance.ReadOnlyList,
+            first => Assert.IsType<D>(first),
+            second => Assert.IsType<I>(second));
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorSetArguments()
+    {
+        var testSection = _config.GetSection("case_9_set");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        var set = Assert.IsType<HashSet<C>>(instance.Set);
+        Assert.Contains(set, item => item is D);
+        Assert.Contains(set, item => item is I);
+    }
+
+#if NET5_0_OR_GREATER
+    [Fact]
+    public void ShouldBindToConstructorReadOnlySetArguments()
+    {
+        var testSection = _config.GetSection("case_9_readOnlySet");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        var readOnlySet = Assert.IsType<HashSet<C>>(instance.ReadOnlySet);
+        Assert.Contains(readOnlySet, item => item is D);
+        Assert.Contains(readOnlySet, item => item is I);
+    }
+#endif
+
+    [Fact]
+    public void ShouldBindToConstructorDictionaryArguments()
+    {
+        var testSection = _config.GetSection("case_9_dictionary");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        var dictionary = Assert.IsType<Dictionary<string, C>>(instance.Dictionary);
+        Assert.IsType<D>(dictionary["a"]);
+        Assert.IsType<I>(dictionary["b"]);
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorReadOnlyDictionaryArguments()
+    {
+        var testSection = _config.GetSection("case_9_readOnlyDictionary");
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        var readOnlyDictionary = Assert.IsType<Dictionary<string, C>>(instance.ReadOnlyDictionary);
+        Assert.IsType<D>(readOnlyDictionary["a"]);
+        Assert.IsType<I>(readOnlyDictionary["b"]);
+    }
+
+    [Fact]
+    public void ShouldBindToConstructorDictionaryArgumentsWithExplicitImplementation()
+    {
+#if NETFRAMEWORK
+        // SortedDictionary is in a different assembly in .Net Framework
+        var testSection = _config.GetSection("case_9_dictionary_explicit_implementation_net_framework");
+#else
+        var testSection = _config.GetSection("case_9_dictionary_explicit_implementation");
+#endif
+
+        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
+        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
+        var dictionary = Assert.IsType<SortedDictionary<string, C>>(instance.Dictionary);
+        Assert.IsType<D>(dictionary["a"]);
+        Assert.IsType<I>(dictionary["b"]);
     }
 
     class A
@@ -85,11 +230,33 @@ public class ObjectArgumentValueTests
 
     class H
     {
-        public J<C>? Collection { get; }
+        public J<C>? Concrete { get; }
+        public IEnumerable<C>? Enumerable { get; }
+        public ICollection<C>? Collection { get; }
+        public IReadOnlyCollection<C>? ReadOnlyCollection { get; }
+        public IList<C>? List { get; }
+        public IReadOnlyList<C>? ReadOnlyList { get; }
+        public ISet<C>? Set { get; }
+#if NET5_0_OR_GREATER
+        public IReadOnlySet<C>? ReadOnlySet { get; }
+#endif
+        public IDictionary<string, C>? Dictionary { get; }
+        public IReadOnlyDictionary<string, C>? ReadOnlyDictionary { get; }
 
         public H(params string[] strings) { }
         public H(C[] array) { }
-        public H(J<C> collection) { Collection = collection; }
+        public H(J<C> concrete) { Concrete = concrete; }
+        public H(IEnumerable<C> enumerable) { Enumerable = enumerable; }
+        public H(ICollection<C> collection) { Collection = collection; }
+        public H(IReadOnlyCollection<C> readOnlyCollection) { ReadOnlyCollection = readOnlyCollection; }
+        public H(IList<C> list) { List = list; }
+        public H(IReadOnlyList<C> readOnlyList) { ReadOnlyList = readOnlyList; }
+        public H(ISet<C> set) { Set = set; }
+#if NET5_0_OR_GREATER
+        public H(IReadOnlySet<C> readOnlySet) { ReadOnlySet = readOnlySet; }
+#endif
+        public H(IDictionary<string, C> dictionary) { Dictionary = dictionary; }
+        public H(IReadOnlyDictionary<string, C> readOnlyDictionary) { ReadOnlyDictionary = readOnlyDictionary; }
     }
 
     class I : C { }
