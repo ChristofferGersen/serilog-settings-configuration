@@ -79,15 +79,16 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         {
             result = null;
 
-            if (IsConstructableDictionary(toType, elementType, out var concreteType, out var addMethod))
+            if (IsConstructableDictionary(toType, elementType, out var concreteType, out var keyType, out var valueType, out var addMethod))
             {
                 result = Activator.CreateInstance(concreteType) ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for {concreteType}");
 
                 foreach (var section in _section.GetChildren())
                 {
                     var argumentValue = ConfigurationReader.GetArgumentValue(section, _configurationAssemblies);
-                    var value = argumentValue.ConvertTo(elementType, resolutionContext);
-                    addMethod.Invoke(result, new[] { section.Key, value });
+                    var key = new StringArgumentValue(section.Key).ConvertTo(keyType, resolutionContext);
+                    var value = argumentValue.ConvertTo(valueType, resolutionContext);
+                    addMethod.Invoke(result, new[] { key, value });
                 }
                 return true;
             }
@@ -262,21 +263,23 @@ class ObjectArgumentValue : IConfigurationArgumentValue
                         {
                             argumentExpression = Expression.Convert(ctorExpression, type);
                         }
-                        else {
+                        else
+                        {
                             argumentExpression = ctorExpression;
                         }
                         return true;
                     }
                     if (IsContainer(type, out elementType))
                     {
-                        if (IsConstructableDictionary(type, elementType, out var concreteType, out var addMethod))
+                        if (IsConstructableDictionary(type, elementType, out var concreteType, out var keyType, out var valueType, out var addMethod))
                         {
                             var elements = new List<ElementInit>();
                             foreach (var element in s.GetChildren())
                             {
-                                if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
+                                if (TryBindToCtorArgument(element, valueType, resolutionContext, out var elementExpression))
                                 {
-                                    elements.Add(Expression.ElementInit(addMethod, Expression.Constant(element.Key), elementExpression));
+                                    var key = new StringArgumentValue(element.Key).ConvertTo(keyType, resolutionContext);
+                                    elements.Add(Expression.ElementInit(addMethod, Expression.Constant(key, keyType), elementExpression));
                                 }
                                 else
                                 {
@@ -337,24 +340,19 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         return false;
     }
 
-    static bool IsConstructableDictionary(Type type, Type elementType, [NotNullWhen(true)] out Type? concreteType, [NotNullWhen(true)] out MethodInfo? addMethod)
+    static bool IsConstructableDictionary(Type type, Type elementType, [NotNullWhen(true)] out Type? concreteType, [NotNullWhen(true)] out Type? keyType, [NotNullWhen(true)] out Type? valueType, [NotNullWhen(true)] out MethodInfo? addMethod)
     {
         concreteType = null;
+        keyType = null;
+        valueType = null;
         addMethod = null;
         if (!elementType.IsGenericType || elementType.GetGenericTypeDefinition() != typeof(KeyValuePair<,>))
         {
             return false;
         }
         var argumentTypes = elementType.GetGenericArguments();
-        if (argumentTypes[0] != typeof(string))
-        {
-            return false;
-        }
-        if (!typeof(IDictionary<,>).MakeGenericType(argumentTypes).IsAssignableFrom(type)
-            && !typeof(IReadOnlyDictionary<,>).MakeGenericType(argumentTypes).IsAssignableFrom(type))
-        {
-            return false;
-        }
+        keyType = argumentTypes[0];
+        valueType = argumentTypes[1];
         if (type.IsAbstract)
         {
             concreteType = typeof(Dictionary<,>).MakeGenericType(argumentTypes);
@@ -371,13 +369,12 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         {
             return false;
         }
-        var valueType = argumentTypes[1];
         foreach (var method in concreteType.GetMethods())
         {
             if (!method.IsStatic && method.Name == "Add")
             {
                 var parameters = method.GetParameters();
-                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string) && parameters[1].ParameterType == valueType)
+                if (parameters.Length == 2 && parameters[0].ParameterType == keyType && parameters[1].ParameterType == valueType)
                 {
                     addMethod = method;
                     return true;
