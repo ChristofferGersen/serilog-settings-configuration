@@ -1,6 +1,13 @@
 ﻿using Microsoft.Extensions.Configuration;
+using Serilog.Configuration;
+using Serilog.Events;
+using Serilog.Settings.Configuration.Tests.Support;
 using System.Collections;
-using System.Linq.Expressions;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Reflection;
+using TestDummies;
+using TestDummies.Console;
 
 // ReSharper disable UnusedMember.Local
 // ReSharper disable UnusedParameter.Local
@@ -10,273 +17,1129 @@ namespace Serilog.Settings.Configuration.Tests;
 
 public class ObjectArgumentValueTests
 {
-    readonly IConfigurationRoot _config;
-
-    public ObjectArgumentValueTests()
+    private static T ConvertToReturnsType<T>(ObjectArgumentValue value, ResolutionContext? resolutionContext = null)
     {
-        _config = new ConfigurationBuilder()
-            .AddJsonFile("ObjectArgumentValueTests.json")
-            .Build();
-    }
-
-    [Theory]
-    [InlineData("case_1", typeof(A), "new A(1, 23:59:59, http://dot.com/, \"d\")")]
-    [InlineData("case_2", typeof(B), "new B(2, new A(3, new D()), null)")]
-    [InlineData("case_3", typeof(E), "new E(\"1\", \"2\", \"3\")")]
-    [InlineData("case_4", typeof(F), "new F(\"paramType\", new E(1, 2, 3, 4))")]
-    [InlineData("case_5", typeof(G), "new G()")]
-    [InlineData("case_6", typeof(G), "new G(3, 4)")]
-    [InlineData("case_7", typeof(H), "new H(new [] {\"1\", \"2\"})")]
-    [InlineData("case_8", typeof(H), "new H(new [] {new D(), new I()})")]
-    [InlineData("case_9", typeof(H), "new H(new J`1() {Void Add(C)(new D()), Void Add(C)(new I())})")]
-    public void ShouldBindToConstructorArguments(string caseSection, Type targetType, string expectedExpression)
-    {
-        var testSection = _config.GetSection(caseSection);
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, targetType, new(), out var ctorExpression));
-        Assert.Equal(expectedExpression, ctorExpression.ToString());
+        return Assert.IsType<T>(value.ConvertTo(typeof(T), resolutionContext ?? new()));
     }
 
     [Fact]
-    public void ShouldBindToConstructorConcreteContainerArguments()
+    public void ConvertToIConfigurationSection()
     {
-        var testSection = _config.GetSection("case_9");
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": {  } }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<J<C>>(instance.Concrete);
-        Assert.Collection(instance.Concrete,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var actual = value.ConvertTo(typeof(IConfigurationSection), new());
+
+        Assert.Same(section, actual);
     }
 
     [Fact]
-    public void ShouldBindToConstructorEnumerableArguments()
+    public void ConvertToLoggerConfigurationCallback()
     {
-        var testSection = _config.GetSection("case_9_enumerable");
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Serilog": {
+                    "WriteTo": [{
+                        "Name": "DummyRollingFile",
+                        "Args": {"pathFormat" : "C:\\"}
+                    }],
+                    "Enrich": ["WithDummyThreadId"]
+                }
+            }
+            """, "Serilog");
+        var value = new ObjectArgumentValue(section, [typeof(DummyRollingFileSink).GetTypeInfo().Assembly]);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<List<C>>(instance.Enumerable);
-        Assert.Collection(instance.Enumerable,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var configure = ConvertToReturnsType<Action<LoggerConfiguration>>(value);
+
+        var config = new LoggerConfiguration();
+        configure(config);
+        var log = config.CreateLogger();
+        DummyRollingFileSink.Emitted.Clear();
+
+        log.Write(Some.InformationEvent());
+
+        var evt = Assert.Single(DummyRollingFileSink.Emitted);
+        Assert.True(evt.Properties.ContainsKey("ThreadId"), "Event should have enriched property ThreadId");
     }
 
     [Fact]
-    public void ShouldBindToConstructorEnumerableArgumentsWithExplicitStructImplementation()
+    public void ConvertToLoggerSinkConfigurationCallback()
     {
-        var testSection = _config.GetSection("case_9_enumerable_explicit_struct_implementation");
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "WriteTo": [{
+                    "Name": "Dummy",
+                    "Args": {
+                        "wrappedSinkAction" : [{ "Name": "DummyConsole", "Args": {} }]
+                    }
+                }]
+            }
+            """, "WriteTo");
+        var value = new ObjectArgumentValue(section, [typeof(DummyConfigurationSink).GetTypeInfo().Assembly]);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<ArraySegment<C>>(instance.Enumerable);
-        Assert.Collection(instance.Enumerable,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var configureSinks = ConvertToReturnsType<Action<LoggerSinkConfiguration>>(value);
+
+        var config = new LoggerConfiguration();
+        configureSinks(config.WriteTo);
+        var log = config.CreateLogger();
+        DummyConsoleSink.Emitted.Clear();
+        DummyWrappingSink.Emitted.Clear();
+
+        log.Write(Some.InformationEvent());
+
+        Assert.Single(DummyWrappingSink.Emitted);
+        Assert.Single(DummyConsoleSink.Emitted);
     }
 
     [Fact]
-    public void ShouldBindToConstructorCollectionArguments()
+    public void ConvertToLoggerEnrichmentConfiguration()
     {
-        var testSection = _config.GetSection("case_9_collection");
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Enrich": [{
+                    "Name": "AtLevel",
+                    "Args": {
+                        "enrichFromLevel": "Warning",
+                        "configureEnricher": [ "WithDummyThreadId" ]
+                    }
+                }]
+            }
+            """, "Enrich");
+        var value = new ObjectArgumentValue(
+            section,
+            [
+                typeof(LoggerEnrichmentConfiguration).GetTypeInfo().Assembly,
+                typeof(DummyThreadIdEnricher).GetTypeInfo().Assembly
+            ]);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<List<C>>(instance.Collection);
-        Assert.Collection(instance.Collection,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var configureEnrichment = ConvertToReturnsType<Action<LoggerEnrichmentConfiguration>>(value);
+
+        var config = new LoggerConfiguration();
+        config.WriteTo.DummyRollingFile("");
+        configureEnrichment(config.Enrich);
+        var log = config.CreateLogger();
+
+        DummyRollingFileSink.Emitted.Clear();
+
+        log.Write(Some.InformationEvent());
+        log.Write(Some.WarningEvent());
+
+        Assert.Collection(DummyRollingFileSink.Emitted,
+            info => Assert.False(info.Properties.ContainsKey("ThreadId"), "Information event or lower should not have enriched property ThreadId"),
+            warn => Assert.True(warn.Properties.ContainsKey("ThreadId"), "Warning event or higher should have enriched property ThreadId"));
     }
 
     [Fact]
-    public void ShouldBindToConstructorReadOnlyCollectionArguments()
+    public void ConvertToConfigurationCallbackThrows()
     {
-        var testSection = _config.GetSection("case_9_readOnlyCollection");
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Configure": {}
+            }
+            """, "Configure");
+        var value = new ObjectArgumentValue(section, []);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<List<C>>(instance.ReadOnlyCollection);
-        Assert.Collection(instance.ReadOnlyCollection,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var ex = Assert.Throws<ArgumentException>(() => value.ConvertTo(typeof(Action<ConfigurationReaderOptions>), new()));
+
+        Assert.Equal("Configuration resolution for Action<ConfigurationReaderOptions> parameter type at the path Configure is not implemented.", ex.Message);
     }
 
     [Fact]
-    public void ShouldBindToConstructorListArguments()
+    public void ConvertToArrayUsingStringArgumentValueForElements()
     {
-        var testSection = _config.GetSection("case_9_list");
+        var section = JsonStringConfigSource.LoadSection("{ \"Array\": [ \"Information\", 3, null ] }", "Array");
+        var value = new ObjectArgumentValue(section, []);
 
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<List<C>>(instance.List);
-        Assert.Collection(instance.List,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
+        var array = ConvertToReturnsType<LogEventLevel?[]>(value);
+
+        Assert.Equal([LogEventLevel.Information, LogEventLevel.Warning, null], array);
     }
 
     [Fact]
-    public void ShouldBindToConstructorReadOnlyListArguments()
+    public void ConvertToArrayOfArraysPassingContext()
     {
-        var testSection = _config.GetSection("case_9_readOnlyList");
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        Assert.IsType<List<C>>(instance.ReadOnlyList);
-        Assert.Collection(instance.ReadOnlyList,
-            first => Assert.IsType<D>(first),
-            second => Assert.IsType<I>(second));
-    }
-
-    [Fact]
-    public void ShouldBindToConstructorSetArguments()
-    {
-        var testSection = _config.GetSection("case_9_set");
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        var set = Assert.IsType<HashSet<C>>(instance.Set);
-        Assert.Contains(set, item => item is D);
-        Assert.Contains(set, item => item is I);
-    }
-
-#if NET5_0_OR_GREATER
-    [Fact]
-    public void ShouldBindToConstructorReadOnlySetArguments()
-    {
-        var testSection = _config.GetSection("case_9_readOnlySet");
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        var readOnlySet = Assert.IsType<HashSet<C>>(instance.ReadOnlySet);
-        Assert.Contains(readOnlySet, item => item is D);
-        Assert.Contains(readOnlySet, item => item is I);
-    }
-#endif
-
-    [Fact]
-    public void ShouldBindToConstructorDictionaryArguments()
-    {
-        var testSection = _config.GetSection("case_9_dictionary");
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        var dictionary = Assert.IsType<Dictionary<string, C>>(instance.Dictionary);
-        Assert.IsType<D>(dictionary["a"]);
-        Assert.IsType<I>(dictionary["b"]);
-    }
-
-    [Fact]
-    public void ShouldBindToConstructorReadOnlyDictionaryArguments()
-    {
-        var testSection = _config.GetSection("case_9_readOnlyDictionary");
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        var readOnlyDictionary = Assert.IsType<Dictionary<string, C>>(instance.ReadOnlyDictionary);
-        Assert.IsType<D>(readOnlyDictionary["a"]);
-        Assert.IsType<I>(readOnlyDictionary["b"]);
-    }
-
-    [Fact]
-    public void ShouldBindToConstructorDictionaryArgumentsWithExplicitImplementation()
-    {
-#if NETFRAMEWORK
-        // SortedDictionary is in a different assembly in .Net Framework
-        var testSection = _config.GetSection("case_9_dictionary_explicit_implementation_net_framework");
-#else
-        var testSection = _config.GetSection("case_9_dictionary_explicit_implementation");
-#endif
-
-        Assert.True(ObjectArgumentValue.TryBuildCtorExpression(testSection, typeof(H), new(), out var ctorExpression));
-        var instance = Expression.Lambda<Func<H>>(ctorExpression).Compile()();
-        var dictionary = Assert.IsType<SortedDictionary<string, C>>(instance.Dictionary);
-        Assert.IsType<D>(dictionary["a"]);
-        Assert.IsType<I>(dictionary["b"]);
-    }
-
-    class A
-    {
-        public A(int a, TimeSpan b, Uri c, string d = "d") { }
-        public A(int a, C c) { }
-    }
-
-    class B
-    {
-        public B(int b, A a, long? c = null) { }
-    }
-
-    interface C { }
-
-    class D : C { }
-
-    class E
-    {
-        public E(int a, int b, int c, int d = 4) { }
-        public E(int a, string b, string c) { }
-        public E(string a, string b, string c) { }
-    }
-
-    class F
-    {
-        public F(string type, E e) { }
-    }
-
-    class G
-    {
-        public G() { }
-        public G(int a = 1, int b = 2) { }
-    }
-
-    class H
-    {
-        public J<C>? Concrete { get; }
-        public IEnumerable<C>? Enumerable { get; }
-        public ICollection<C>? Collection { get; }
-        public IReadOnlyCollection<C>? ReadOnlyCollection { get; }
-        public IList<C>? List { get; }
-        public IReadOnlyList<C>? ReadOnlyList { get; }
-        public ISet<C>? Set { get; }
-#if NET5_0_OR_GREATER
-        public IReadOnlySet<C>? ReadOnlySet { get; }
-#endif
-        public IDictionary<string, C>? Dictionary { get; }
-        public IReadOnlyDictionary<string, C>? ReadOnlyDictionary { get; }
-
-        public H(params string[] strings) { }
-        public H(C[] array) { }
-        public H(J<C> concrete) { Concrete = concrete; }
-        public H(IEnumerable<C> enumerable) { Enumerable = enumerable; }
-        public H(ICollection<C> collection) { Collection = collection; }
-        public H(IReadOnlyCollection<C> readOnlyCollection) { ReadOnlyCollection = readOnlyCollection; }
-        public H(IList<C> list) { List = list; }
-        public H(IReadOnlyList<C> readOnlyList) { ReadOnlyList = readOnlyList; }
-        public H(ISet<C> set) { Set = set; }
-#if NET5_0_OR_GREATER
-        public H(IReadOnlySet<C> readOnlySet) { ReadOnlySet = readOnlySet; }
-#endif
-        public H(IDictionary<string, C> dictionary) { Dictionary = dictionary; }
-        public H(IReadOnlyDictionary<string, C> readOnlyDictionary) { ReadOnlyDictionary = readOnlyDictionary; }
-    }
-
-    class I : C { }
-
-    class J<T> : IEnumerable<T>
-    {
-        private List<T> list = new();
-        public void Add(T value)
+        var formatProvider = new NumberFormatInfo()
         {
-            list.Add(value);
-        }
+            NumberDecimalSeparator = ",",
+            NumberGroupSeparator = ".",
+            NumberGroupSizes = [3],
+        };
 
-        public IEnumerator<T> GetEnumerator()
+        var section = JsonStringConfigSource.LoadSection("{ \"Array\": [ [ 1, 2 ], [ 3, 4 ], [ \"1.234,56\" ] ] }", "Array");
+        var value = new ObjectArgumentValue(section, []);
+
+        var array = ConvertToReturnsType<decimal[][]>(value, new(readerOptions: new() { FormatProvider = formatProvider }));
+
+        Assert.Equal([[1, 2], [3, 4], [1_234.56M]], array);
+    }
+
+    [Fact]
+    public void ConvertToArrayRecursingObjectArgumentValuePassingAssemblies()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Array": [{ "WriteTo": [{ "Name": "DummyConsole", "Args": {} }] }]
+            }
+            """, "Array");
+        var value = new ObjectArgumentValue(section, [typeof(DummyConsoleSink).GetTypeInfo().Assembly]);
+
+        var configureCalls = ConvertToReturnsType<Action<LoggerConfiguration>[]>(value);
+
+        var configure = Assert.Single(configureCalls);
+        var config = new LoggerConfiguration();
+        configure(config);
+        var log = config.CreateLogger();
+        DummyConsoleSink.Emitted.Clear();
+
+        log.Write(Some.InformationEvent());
+
+        Assert.Single(DummyConsoleSink.Emitted);
+    }
+
+    [Fact]
+    public void ConvertToArrayWithDifferentImplementations()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Array": [
+                    "Serilog.Settings.Configuration.Tests.Support.ConcreteImpl::Instance, Serilog.Settings.Configuration.Tests",
+                    "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PrivateImplWithPublicCtor, Serilog.Settings.Configuration.Tests"
+                ]
+            }
+            """, "Array");
+        var value = new ObjectArgumentValue(section, []);
+
+        var array = ConvertToReturnsType<AnAbstractClass[]>(value);
+
+        Assert.Collection(array,
+            first => Assert.IsType<ConcreteImpl>(first),
+            second => Assert.IsType<PrivateImplWithPublicCtor>(second));
+    }
+
+    [Fact]
+    public void ConvertToContainerUsingStringArgumentValueForElements()
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"List\": [ \"Information\", 3, null ] }", "List");
+        var value = new ObjectArgumentValue(section, []);
+
+        var list = ConvertToReturnsType<List<LogEventLevel?>>(value);
+
+        Assert.Equal([LogEventLevel.Information, LogEventLevel.Warning, null], list);
+    }
+
+    [Fact]
+    public void ConvertToNestedContainerPassingContext()
+    {
+        var formatProvider = new NumberFormatInfo()
         {
-            return list.GetEnumerator();
+            NumberDecimalSeparator = ",",
+            NumberGroupSeparator = ".",
+            NumberGroupSizes = [3],
+        };
+
+        var section = JsonStringConfigSource.LoadSection("{ \"List\": [ [ 1, 2 ], [ 3, 4 ], [ \"1.234,56\" ] ] }", "List");
+        var value = new ObjectArgumentValue(section, []);
+
+        var array = ConvertToReturnsType<List<List<decimal>>>(value, new(readerOptions: new() { FormatProvider = formatProvider }));
+
+        Assert.Equal([[1, 2], [3, 4], [1_234.56M]], array);
+    }
+
+    [Fact]
+    public void ConvertToContainerRecursingObjectArgumentValuePassingAssemblies()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "List": [{ "WriteTo": [{ "Name": "DummyConsole", "Args": {} }] }]
+            }
+            """, "List");
+        var value = new ObjectArgumentValue(section, [typeof(DummyConsoleSink).GetTypeInfo().Assembly]);
+
+        var configureCalls = ConvertToReturnsType<List<Action<LoggerConfiguration>>>(value);
+
+        var configure = Assert.Single(configureCalls);
+        var config = new LoggerConfiguration();
+        configure(config);
+        var log = config.CreateLogger();
+        DummyConsoleSink.Emitted.Clear();
+
+        log.Write(Some.InformationEvent());
+
+        Assert.Single(DummyConsoleSink.Emitted);
+    }
+
+    [Fact]
+    public void ConvertToListWithDifferentImplementations()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "List": [
+                    "Serilog.Settings.Configuration.Tests.Support.ConcreteImpl::Instance, Serilog.Settings.Configuration.Tests",
+                    "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PrivateImplWithPublicCtor, Serilog.Settings.Configuration.Tests"
+                ]
+            }
+            """, "List");
+        var value = new ObjectArgumentValue(section, []);
+
+        var list = ConvertToReturnsType<List<AnAbstractClass>>(value);
+
+        Assert.Collection(list,
+            first => Assert.IsType<ConcreteImpl>(first),
+            second => Assert.IsType<PrivateImplWithPublicCtor>(second));
+    }
+
+    public class UnsupportedContainer : IEnumerable<string>
+    {
+        public IEnumerator<string> GetEnumerator()
+        {
+            return Enumerable.Empty<string>().GetEnumerator();
         }
 
         IEnumerator IEnumerable.GetEnumerator()
         {
-            return list.GetEnumerator();
+            return GetEnumerator();
         }
+    }
+
+    [Fact]
+    public void ConvertToUnsupportedContainerWillBeCreatedButWillRemainEmpty()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "List": ["a", "b"]
+            }
+            """, "List");
+        var value = new ObjectArgumentValue(section, []);
+
+        var unsupported = ConvertToReturnsType<UnsupportedContainer>(value);
+
+        Assert.Empty(unsupported);
+    }
+
+    [Theory]
+    [InlineData(typeof(IEnumerable<int>))]
+    [InlineData(typeof(ICollection<int>))]
+    [InlineData(typeof(IReadOnlyCollection<int>))]
+    [InlineData(typeof(IList<int>))]
+    [InlineData(typeof(IReadOnlyList<int>))]
+    [InlineData(typeof(List<int>))]
+    public void ConvertToContainerUsingList(Type containerType)
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Container\": [ 1, 1 ] }", "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var container = value.ConvertTo(containerType, new());
+
+        var list = Assert.IsType<List<int>>(container);
+        Assert.Equal([1, 1], list);
+    }
+
+    [Theory]
+    [InlineData(typeof(ISet<int>))]
+#if NET5_0_OR_GREATER
+    [InlineData(typeof(IReadOnlySet<int>))]
+#endif
+    [InlineData(typeof(HashSet<int>))]
+    public void ConvertToContainerUsingHashSet(Type containerType)
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Container\": [ 1, 1, 2, 2 ] }", "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var container = value.ConvertTo(containerType, new());
+
+        var set = Assert.IsType<HashSet<int>>(container);
+        Assert.Equal([1, 2], set);
+    }
+
+    [Fact]
+    public void ConvertToForcedHashSetImplementationWithCustomComparer()
+    {
+        // In .Net Framework HashSet<T> is not part of mscorlib, but inside System.Core
+        // As a result the type string "System.Collections.Generic.HashSet`1[[System.String]]" will fail
+        // Using AssemblyQualifiedName to automatically switch to the correct type string, depending of framework
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Container":
+                {
+                    "type": "{{typeof(HashSet<string>).AssemblyQualifiedName}}",
+                    "collection": [
+                        "a",
+                        "A",
+                        "b",
+                        "b"
+                    ],
+                    "comparer": "System.StringComparer::OrdinalIgnoreCase"
+                }
+            }
+            """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var container = value.ConvertTo(typeof(IEnumerable<string>), new());
+
+        var set = Assert.IsType<HashSet<string>>(container);
+        Assert.Equal(["a", "b"], set);
+    }
+
+    [Theory]
+    [InlineData(typeof(IEnumerable<KeyValuePair<string, int>>))]
+    [InlineData(typeof(ICollection<KeyValuePair<string, int>>))]
+    [InlineData(typeof(IReadOnlyCollection<KeyValuePair<string, int>>))]
+    [InlineData(typeof(IDictionary<string, int>))]
+    [InlineData(typeof(IReadOnlyDictionary<string, int>))]
+    [InlineData(typeof(Dictionary<string, int>))]
+    public void ConvertToContainerUsingDictionary(Type containerType)
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Container": {
+                    "a": 1,
+                    "b": 2
+                }
+            }
+        """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var container = value.ConvertTo(containerType, new());
+
+        var dictionary = Assert.IsType<Dictionary<string, int>>(container);
+        Assert.Equal(new Dictionary<string, int>() { { "a", 1 }, { "b", 2 } }, dictionary);
+    }
+
+    [Theory]
+    [InlineData(typeof(IEnumerable<KeyValuePair<int, int>>))]
+    [InlineData(typeof(ICollection<KeyValuePair<int, int>>))]
+    [InlineData(typeof(IReadOnlyCollection<KeyValuePair<int, int>>))]
+    [InlineData(typeof(IDictionary<int, int>))]
+    [InlineData(typeof(IReadOnlyDictionary<int, int>))]
+    [InlineData(typeof(Dictionary<int, int>))]
+    public void ConvertToContainerUsingDictionaryUsingStringArgumentValueToConvertKey(Type containerType)
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Container": {
+                    "1": 2,
+                    "3": 4
+                }
+            }
+        """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var container = value.ConvertTo(containerType, new());
+
+        var dictionary = Assert.IsType<Dictionary<int, int>>(container);
+        Assert.Equal(new Dictionary<int, int>() { { 1, 2 }, { 3, 4 } }, dictionary);
+    }
+
+    class DictionaryWithoutPublicDefaultConstructor : IDictionary<string, int>
+    {
+        private readonly IDictionary<string, int> backing;
+
+        public int this[string key] { get => backing[key]; set => backing[key] = value; }
+
+        public ICollection<string> Keys => backing.Keys;
+
+        public ICollection<int> Values => backing.Values;
+
+        public int Count => backing.Count;
+
+        public bool IsReadOnly => backing.IsReadOnly;
+
+        // Normally there would be a default constructor here, like: public DictionaryWithoutPublicDefaultConstructor() {}
+        public DictionaryWithoutPublicDefaultConstructor(IDictionary<string, int> values) { backing = values; }
+
+        public void Add(string key, int value)
+        {
+            backing.Add(key, value);
+        }
+
+        public void Add(KeyValuePair<string, int> item)
+        {
+            backing.Add(item);
+        }
+
+        public void Clear()
+        {
+            backing.Clear();
+        }
+
+        public bool Contains(KeyValuePair<string, int> item)
+        {
+            return backing.Contains(item);
+        }
+
+        public bool ContainsKey(string key)
+        {
+            return backing.ContainsKey(key);
+        }
+
+        public void CopyTo(KeyValuePair<string, int>[] array, int arrayIndex)
+        {
+            backing.CopyTo(array, arrayIndex);
+        }
+
+        public IEnumerator<KeyValuePair<string, int>> GetEnumerator()
+        {
+            return backing.GetEnumerator();
+        }
+
+        public bool Remove(string key)
+        {
+            return backing.Remove(key);
+        }
+
+        public bool Remove(KeyValuePair<string, int> item)
+        {
+            return backing.Remove(item);
+        }
+
+        public bool TryGetValue(string key, [MaybeNullWhen(false)] out int value)
+        {
+            return backing.TryGetValue(key, out value);
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return ((IEnumerable)backing).GetEnumerator();
+        }
+    }
+
+    [Fact]
+    public void ConvertToContainerUsingDictionaryWithoutPublicDefaultConstructor()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Container": {
+                    "values":
+                    {
+                        "a": 1,
+                        "b": 2
+                    }
+                }
+            }
+        """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        var dictionary = ConvertToReturnsType<DictionaryWithoutPublicDefaultConstructor>(value);
+
+        Assert.Equal(new Dictionary<string, int>() { { "a", 1 }, { "b", 2 } }, dictionary);
+    }
+
+    public abstract class CustomAbstractDictionary : IDictionary<string, int>
+    {
+        public abstract int this[string key] { get; set; }
+
+        public abstract ICollection<string> Keys { get; }
+        public abstract ICollection<int> Values { get; }
+        public abstract int Count { get; }
+        public abstract bool IsReadOnly { get; }
+
+        public abstract void Add(string key, int value);
+        public abstract void Add(KeyValuePair<string, int> item);
+        public abstract void Clear();
+        public abstract bool Contains(KeyValuePair<string, int> item);
+        public abstract bool ContainsKey(string key);
+        public abstract void CopyTo(KeyValuePair<string, int>[] array, int arrayIndex);
+        public abstract IEnumerator<KeyValuePair<string, int>> GetEnumerator();
+        public abstract bool Remove(string key);
+        public abstract bool Remove(KeyValuePair<string, int> item);
+        public abstract bool TryGetValue(string key, [MaybeNullWhen(false)] out int value);
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    [Fact]
+    public void ConvertToCustomAbstractDictionaryThrows()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Container": {
+                    "a": 1,
+                    "b": 2
+                }
+            }
+        """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        Assert.Throws<InvalidOperationException>(() => value.ConvertTo(typeof(CustomAbstractDictionary), new()));
+    }
+
+    public class CustomReadOnlyDictionary : IReadOnlyDictionary<string, int>
+    {
+        public int this[string key] => throw new NotImplementedException();
+
+        public IEnumerable<string> Keys => throw new NotImplementedException();
+
+        public IEnumerable<int> Values => throw new NotImplementedException();
+
+        public int Count => throw new NotImplementedException();
+
+        public bool ContainsKey(string key)
+        {
+            throw new NotImplementedException();
+        }
+
+        public IEnumerator<KeyValuePair<string, int>> GetEnumerator()
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool TryGetValue(string key, [MaybeNullWhen(false)] out int value)
+        {
+            throw new NotImplementedException();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    [Fact]
+    public void ConvertToCustomReadOnlyDictionaryCreatesEmpty()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Container": {
+                    "a": 1,
+                    "b": 2
+                }
+            }
+        """, "Container");
+        var value = new ObjectArgumentValue(section, []);
+
+        ConvertToReturnsType<CustomReadOnlyDictionary>(value);
+    }
+
+    class PrivateImplWithPublicCtor : AnAbstractClass, IAmAnInterface
+    {
+    }
+
+    [Theory]
+    [InlineData(typeof(AbstractClass), typeof(ConcreteClass))]
+    [InlineData(typeof(IAmAnInterface), typeof(PrivateImplWithPublicCtor))]
+    [InlineData(typeof(AnAbstractClass), typeof(PrivateImplWithPublicCtor))]
+    [InlineData(typeof(AConcreteClass), typeof(ConcreteImplOfConcreteClass))]
+    public void ConvertToExplicitType(Type targetType, Type expectedType)
+    {
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": { "type": "{{expectedType.AssemblyQualifiedName}}"}
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(targetType, new());
+
+        Assert.IsType(expectedType, result);
+    }
+
+    class WithTypeArgumentClassCtor : AnAbstractClass
+    {
+        public string Type { get; }
+
+        public WithTypeArgumentClassCtor(string type) { Type = type; }
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeUsingTypeAsConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "$type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithTypeArgumentClassCtor, Serilog.Settings.Configuration.Tests",
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PrivateImplWithPublicCtor, Serilog.Settings.Configuration.Tests",
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(AnAbstractClass), new());
+
+        var actual = Assert.IsType<WithTypeArgumentClassCtor>(result);
+        Assert.Equal("Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PrivateImplWithPublicCtor, Serilog.Settings.Configuration.Tests", actual.Type);
+    }
+
+    class WithOverloads : IAmAnInterface
+    {
+        public int A { get; }
+        public TimeSpan B { get; }
+        public Uri? C { get; }
+        public string? D { get; }
+
+        public WithOverloads(int a, TimeSpan b, Uri c)
+        {
+            A = a;
+            B = b;
+            C = c;
+        }
+
+        public WithOverloads(int a, TimeSpan b, Uri c, string d = "d")
+        {
+            A = a;
+            B = b;
+            C = c;
+            D = d;
+        }
+    }
+
+    [Theory]
+    [InlineData("", null)]
+    [InlineData(",\"d\": \"DValue\"", "DValue")]
+    public void ConvertToExplicitTypePickingConstructorOverloadWithMostMatchingArguments(string dJson, string? d)
+    {
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithOverloads, Serilog.Settings.Configuration.Tests",
+                    "a": 1,
+                    "b": "23:59:59",
+                    "c": "http://dot.com/"
+                    {{dJson}}
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<WithOverloads>(result);
+        Assert.Equal(1, actual.A);
+        Assert.Equal(new TimeSpan(23, 59, 59), actual.B);
+        Assert.Equal(new Uri("http://dot.com/"), actual.C);
+        Assert.Equal(d, actual.D);
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeMatchingArgumentsCaseInsensitively()
+    {
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithOverloads, Serilog.Settings.Configuration.Tests",
+                    "A": 1,
+                    "B": "23:59:59",
+                    "C": "http://dot.com/"
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<WithOverloads>(result);
+        Assert.Equal(1, actual.A);
+        Assert.Equal(new TimeSpan(23, 59, 59), actual.B);
+        Assert.Equal(new Uri("http://dot.com/"), actual.C);
+    }
+
+    class WithSimilarOverloads : IAmAnInterface
+    {
+        public object A { get; }
+        public object B { get; }
+        public object C { get; }
+        public int D { get; }
+
+        public WithSimilarOverloads(int a, int b, int c, int d = 1) { A = a; B = b; C = c; D = d; }
+        public WithSimilarOverloads(int a, string b, string c) { A = a; B = b; C = c; D = 2; }
+        public WithSimilarOverloads(string a, string b, string c) { A = a; B = b; C = c; D = 3; }
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypePickingConstructorOverloadWithMostStrings()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithSimilarOverloads, Serilog.Settings.Configuration.Tests",
+                    "a": 1,
+                    "b": 2,
+                    "c": 3
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+        var actual = Assert.IsType<WithSimilarOverloads>(result);
+
+        Assert.Equal("1", actual.A);
+        Assert.Equal("2", actual.B);
+        Assert.Equal("3", actual.C);
+        Assert.Equal(3, actual.D);
+    }
+
+#if NET7_0_OR_GREATER
+    class OnlyDifferentTypeOverloads : IAmAnInterface
+    {
+        public object Value { get; }
+
+        public OnlyDifferentTypeOverloads(int value) { Value = value; }
+        public OnlyDifferentTypeOverloads(long value) { Value = value; }
+    }
+
+    // Is only guaranteed to work when Type.GetConstructors returns constructors in a deterministic order
+    // This is only the case since .Net 7
+    [Fact]
+    public void ConvertToExplicitTypePickingFirstMatchWhenOtherwiseAmbiguous()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+OnlyDifferentTypeOverloads, Serilog.Settings.Configuration.Tests",
+                    "value": 123,
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+        var actual = Assert.IsType<OnlyDifferentTypeOverloads>(result);
+
+        Assert.Equal(123, actual.Value);
+    }
+#endif
+
+    class WithDefaults : IAmAnInterface
+    {
+        public int A { get; }
+        public int B { get; }
+        public int C { get; }
+
+        public WithDefaults(int a, int b = 2, int c = 3)
+        {
+            A = a;
+            B = b;
+            C = c;
+        }
+    }
+
+    [Theory]
+    [InlineData("", 2, 3)]
+    [InlineData(",\"b\": 5", 5, 3)]
+    [InlineData(",\"c\": 6", 2, 6)]
+    [InlineData(",\"b\": 7, \"c\": 8", 7, 8)]
+    public void ConvertToExplicitTypeFillingInDefaultsInConstructor(string json, int b, int c)
+    {
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithDefaults, Serilog.Settings.Configuration.Tests",
+                    "a": 1
+                    {{json}}
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<WithDefaults>(result);
+        Assert.Equal(1, actual.A);
+        Assert.Equal(b, actual.B);
+        Assert.Equal(c, actual.C);
+    }
+
+    class WithParamsArray : IAmAnInterface
+    {
+        public IReadOnlyList<int> Values { get; }
+
+        public WithParamsArray(params int[] values) { Values = values; }
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeWithParamsConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+WithParamsArray, Serilog.Settings.Configuration.Tests",
+                    "values": [1, 2, 3]
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<WithParamsArray>(result);
+        Assert.Equal([1, 2, 3], actual.Values);
+    }
+
+    [Theory]
+    [InlineData(typeof(IEnumerable<int>))]
+    [InlineData(typeof(ICollection<int>))]
+    [InlineData(typeof(IReadOnlyCollection<int>))]
+    [InlineData(typeof(IList<int>))]
+    [InlineData(typeof(IReadOnlyList<int>))]
+    [InlineData(typeof(List<int>))]
+    public void ConvertToExplicitTypeWithContainerConstructorArgument(Type containerType)
+    {
+        var expectedType = typeof(GenericClass<>).MakeGenericType(containerType);
+        var valueProp = expectedType.GetProperty(nameof(GenericClass<object>.Value));
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[{{containerType.AssemblyQualifiedName}}]], Serilog.Settings.Configuration.Tests",
+                    "value": [1, 2, 3]
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        Assert.IsType(expectedType, result);
+        var list = Assert.IsType<List<int>>(valueProp?.GetValue(result));
+        Assert.Equal([1, 2, 3], list);
+    }
+
+    [Theory]
+    [InlineData(typeof(ISet<int>))]
+#if NET5_0_OR_GREATER
+    [InlineData(typeof(IReadOnlySet<int>))]
+#endif
+    [InlineData(typeof(HashSet<int>))]
+    public void ConvertToExplicitTypeWithSetConstructorArgument(Type containerType)
+    {
+        var expectedType = typeof(GenericClass<>).MakeGenericType(containerType);
+        var valueProp = expectedType.GetProperty(nameof(GenericClass<object>.Value));
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[{{containerType.AssemblyQualifiedName}}]], Serilog.Settings.Configuration.Tests",
+                    "value": [ 1, 1, 2, 2 ]
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        Assert.IsType(expectedType, result);
+        var set= Assert.IsType<HashSet<int>>(valueProp?.GetValue(result));
+        Assert.Equal([1, 2], set);
+    }
+
+
+    [Theory]
+    [InlineData(typeof(IEnumerable<KeyValuePair<string, int>>))]
+    [InlineData(typeof(ICollection<KeyValuePair<string, int>>))]
+    [InlineData(typeof(IReadOnlyCollection<KeyValuePair<string, int>>))]
+    [InlineData(typeof(IDictionary<string, int>))]
+    [InlineData(typeof(IReadOnlyDictionary<string, int>))]
+    [InlineData(typeof(Dictionary<string, int>))]
+    public void ConvertToExplicitTypeWithDictionaryConstructorArgument(Type containerType)
+    {
+        var expectedType = typeof(GenericClass<>).MakeGenericType(containerType);
+        var valueProp = expectedType.GetProperty(nameof(GenericClass<object>.Value));
+        var section = JsonStringConfigSource.LoadSection($$"""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[{{containerType.AssemblyQualifiedName}}]], Serilog.Settings.Configuration.Tests",
+                    "value": {
+                        "a": 1,
+                        "b": 2
+                    }
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        Assert.IsType(expectedType, result);
+        var dictionary = Assert.IsType<Dictionary<string, int>>(valueProp?.GetValue(result));
+        Assert.Equal(new Dictionary<string, int>() { { "a", 1 }, { "b", 2 } }, dictionary);
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeWithStructConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PlainStruct, Serilog.Settings.Configuration.Tests]], Serilog.Settings.Configuration.Tests",
+                    "value": { "A" : "1" }
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<GenericClass<PlainStruct>>(result);
+        Assert.Equal("1", actual.Value.A);
+        Assert.Null(actual.Value.B);
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeWithClassConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[TestDummies.DummyLoggerConfigurationExtensions+Binding, TestDummies]], Serilog.Settings.Configuration.Tests",
+                    "value": { "foo" : "bar" }
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<GenericClass<TestDummies.DummyLoggerConfigurationExtensions.Binding>>(result);
+        Assert.Equal("bar", actual.Value.Foo);
+        Assert.Null(actual.Value.Abc);
+    }
+
+    public readonly struct Struct : IAmAnInterface
+    {
+        public readonly string String { get; }
+
+        public Struct(string str) { String = str; }
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeWithExplicitStructConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[Serilog.Settings.Configuration.Tests.Support.IAmAnInterface, Serilog.Settings.Configuration.Tests]], Serilog.Settings.Configuration.Tests",
+                    "value": {
+                        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+Struct, Serilog.Settings.Configuration.Tests",
+                        "str" : "abc"
+                    }
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<GenericClass<IAmAnInterface>>(result);
+        var structValue = Assert.IsType<Struct>(actual.Value);
+        Assert.Equal("abc", structValue.String);
+    }
+
+    [Fact]
+    public void ConvertToExplicitTypeWithExplicitTypeConstructorArgument()
+    {
+        var section = JsonStringConfigSource.LoadSection("""
+            {
+                "Ctor": {
+                    "type": "Serilog.Settings.Configuration.Tests.Support.GenericClass`1[[Serilog.Settings.Configuration.Tests.Support.IAmAnInterface, Serilog.Settings.Configuration.Tests]], Serilog.Settings.Configuration.Tests",
+                    "value": {
+                        "type": "Serilog.Settings.Configuration.Tests.ObjectArgumentValueTests+PrivateImplWithPublicCtor, Serilog.Settings.Configuration.Tests"
+                    }
+                }
+            }
+            """, "Ctor");
+        var value = new ObjectArgumentValue(section, []);
+
+        var result = value.ConvertTo(typeof(IAmAnInterface), new());
+
+        var actual = Assert.IsType<GenericClass<IAmAnInterface>>(result);
+        Assert.IsType<PrivateImplWithPublicCtor>(actual.Value);
+    }
+
+    // While ObjectArgumentValue supports converting to primitives, this is normally handled by StringArgumentValue
+    // ObjectArgumentValue will not honor ConfigurationReaderOptions.FormatProvider, it will use InvariantCulture
+    [Theory]
+    [InlineData(typeof(bool), false, "false")]
+    [InlineData(typeof(bool), true, "true")]
+    [InlineData(typeof(sbyte), (sbyte)-1, "-1")]
+    [InlineData(typeof(byte), (byte)2, "2")]
+    [InlineData(typeof(short), (short)-3, "-3")]
+    [InlineData(typeof(ushort), (ushort)4, "4")]
+    [InlineData(typeof(int), -5, "-5")]
+    [InlineData(typeof(uint), 6U, "6")]
+    [InlineData(typeof(long), -7L, "-7")]
+    [InlineData(typeof(ulong), 8UL, "8")]
+    [InlineData(typeof(float), -9.1F, "-9.1")]
+    [InlineData(typeof(double), 10.2D, "10.2")]
+    public void ConvertToPrimitives(Type type, object expected, string sectionValue)
+    {
+        var section = JsonStringConfigSource.LoadSection($"{{ \"Serilog\": {sectionValue} }}", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(type, new());
+
+        Assert.Equal(expected, actual);
+    }
+
+    // While ObjectArgumentValue supports converting to a nullable primitive, this is normally handled by StringArgumentValue
+    // ObjectArgumentValue will not honor ConfigurationReaderOptions.FormatProvider, it will use InvariantCulture
+    [Fact]
+    public void ConvertToNullablePrimitive()
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": 123 }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(typeof(int?), new());
+
+        Assert.Equal(123, actual);
+    }
+
+    // While ObjectArgumentValue supports converting to a nullable primitive, this is normally handled by StringArgumentValue
+    [Fact]
+    public void ConvertToNullWhenEmptyNullable()
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": null }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(typeof(int?), new());
+
+        Assert.Null(actual);
+    }
+
+    [Fact]
+    public void ConvertToPlainClass()
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": { \"foo\" : \"bar\" } }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(typeof(TestDummies.DummyLoggerConfigurationExtensions.Binding), new());
+
+        var binding = Assert.IsType<TestDummies.DummyLoggerConfigurationExtensions.Binding>(actual);
+        Assert.Equal("bar", binding.Foo);
+        Assert.Null(binding.Abc);
+    }
+
+    private struct PlainStruct
+    {
+        public string? A { get; set; }
+        public string? B { get; set; }
+    }
+
+    [Fact]
+    public void ConvertToPlainStruct()
+    {
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": { \"A\" : \"1\" } }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(typeof(PlainStruct), new());
+
+        var plain = Assert.IsType<PlainStruct>(actual);
+        Assert.Equal("1", plain.A);
+        Assert.Null(plain.B);
+    }
+
+    // While ObjectArgumentValue supports this, a null value is normally handled by StringArgumentValue
+    // This is because IConfigurationSection will resolve null to an empty string
+    // This behavior is under review, see https://github.com/dotnet/runtime/issues/36510
+    [Fact]
+    public void ConvertToNullWhenStructIsNull()
+    {
+
+        var section = JsonStringConfigSource.LoadSection("{ \"Serilog\": null }", "Serilog");
+        var value = new ObjectArgumentValue(section, []);
+
+        var actual = value.ConvertTo(typeof(PlainStruct), new());
+
+        Assert.Null(actual);
     }
 }

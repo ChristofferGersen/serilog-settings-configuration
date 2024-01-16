@@ -1,5 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using System.Linq.Expressions;
 using System.Reflection;
 
 using Microsoft.Extensions.Configuration;
@@ -46,16 +45,16 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         if (toType.IsArray)
             return CreateArray();
 
-        // Only build ctor expression when type is explicitly specified in _section
-        if (TryBuildCtorExpression(_section, resolutionContext, out var ctorExpression))
-            return RunCtorExpression(ctorExpression);
+        // Only try to call ctor when type is explicitly specified in _section
+        if (TryCallCtorExplicit(_section, resolutionContext, out var ctorResult))
+            return ctorResult;
 
         if (IsContainer(toType, out var elementType) && TryCreateContainer(out var container))
             return container;
 
-        // Without a type explicitly specified, attempt to create ctor expression of toType
-        if (TryBuildCtorExpression(_section, toType, resolutionContext, out ctorExpression))
-            return RunCtorExpression(ctorExpression);
+        // Without a type explicitly specified, attempt to call ctor of toType
+        if (TryCallCtorImplicit(_section, toType, resolutionContext, out ctorResult))
+            return ctorResult;
 
         // MS Config binding can work with a limited set of primitive types and collections
         return _section.Get(toType);
@@ -111,14 +110,8 @@ class ObjectArgumentValue : IConfigurationArgumentValue
         }
     }
 
-    static object RunCtorExpression(NewExpression ctorExpression)
-    {
-        Expression body = ctorExpression.Type.IsValueType ? Expression.Convert(ctorExpression, typeof(object)) : ctorExpression;
-        return Expression.Lambda<Func<object>>(body).Compile().Invoke();
-    }
-
-    internal static bool TryBuildCtorExpression(
-        IConfigurationSection section, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    bool TryCallCtorExplicit(
+        IConfigurationSection section, ResolutionContext resolutionContext, [NotNullWhen(true)] out object? value)
     {
         var typeDirective = section.GetValue<string>("$type") switch
         {
@@ -138,35 +131,35 @@ class ObjectArgumentValue : IConfigurationArgumentValue
 
         if (type is null or { IsAbstract: true })
         {
-            ctorExpression = null;
+            value = null;
             return false;
         }
         else
         {
             var suppliedArguments = section.GetChildren().Where(s => s.Key != typeDirective)
                 .ToDictionary(s => s.Key, StringComparer.OrdinalIgnoreCase);
-            return TryBuildCtorExpression(type, suppliedArguments, resolutionContext, out ctorExpression);
+            return TryCallCtor(type, suppliedArguments, resolutionContext, out value);
         }
 
     }
 
-    internal static bool TryBuildCtorExpression(
-        IConfigurationSection section, Type parameterType, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    bool TryCallCtorImplicit(
+        IConfigurationSection section, Type parameterType, ResolutionContext resolutionContext, out object? value)
     {
         var suppliedArguments = section.GetChildren()
             .ToDictionary(s => s.Key, StringComparer.OrdinalIgnoreCase);
-        return TryBuildCtorExpression(parameterType, suppliedArguments, resolutionContext, out ctorExpression);
+        return TryCallCtor(parameterType, suppliedArguments, resolutionContext, out value);
     }
 
-    static bool TryBuildCtorExpression(
-        Type type, Dictionary<string, IConfigurationSection> suppliedArguments, ResolutionContext resolutionContext, [NotNullWhen(true)] out NewExpression? ctorExpression)
+    bool TryCallCtor(
+        Type type, Dictionary<string, IConfigurationSection> suppliedArguments, ResolutionContext resolutionContext, [NotNullWhen(true)] out object? value)
     {
-        ctorExpression = null;
+        value = null;
 
         if (suppliedArguments.Count == 0 &&
             type.GetConstructor(Type.EmptyTypes) is ConstructorInfo parameterlessCtor)
         {
-            ctorExpression = Expression.New(parameterlessCtor);
+            value = parameterlessCtor.Invoke([]);
             return true;
         }
 
@@ -199,122 +192,21 @@ class ObjectArgumentValue : IConfigurationArgumentValue
             return false;
         }
 
-        var ctorArguments = new List<Expression>();
-        foreach (var argumentValue in ctor.ArgumentValues)
+        var ctorArguments = new object?[ctor.ArgumentValues.Count];
+        for (var i = 0; i < ctor.ArgumentValues.Count; i++)
         {
-            if (TryBindToCtorArgument(argumentValue.Value, argumentValue.Type, resolutionContext, out var argumentExpression))
+            var argument = ctor.ArgumentValues[i];
+            var valueValue = argument.Value;
+            if (valueValue is IConfigurationSection s)
             {
-                ctorArguments.Add(argumentExpression);
+                var argumentValue = ConfigurationReader.GetArgumentValue(s, _configurationAssemblies);
+                valueValue = argumentValue.ConvertTo(argument.Type, resolutionContext);
             }
-            else
-            {
-                return false;
-            }
+            ctorArguments[i] = valueValue;
         }
 
-        ctorExpression = Expression.New(ctor.ConstructorInfo, ctorArguments);
+        value = ctor.ConstructorInfo.Invoke(ctorArguments);
         return true;
-
-        static bool TryBindToCtorArgument(object value, Type type, ResolutionContext resolutionContext, [NotNullWhen(true)] out Expression? argumentExpression)
-        {
-            argumentExpression = null;
-
-            if (value is IConfigurationSection s)
-            {
-                if (s.Value is string argValue)
-                {
-                    var stringArgumentValue = new StringArgumentValue(argValue);
-                    try
-                    {
-                        argumentExpression = Expression.Constant(
-                            stringArgumentValue.ConvertTo(type, resolutionContext),
-                            type);
-
-                        return true;
-                    }
-                    catch (Exception)
-                    {
-                        return false;
-                    }
-                }
-                else if (s.GetChildren().Any())
-                {
-                    var elementType = type.GetElementType();
-                    if (elementType is not null)
-                    {
-                        var elements = new List<Expression>();
-                        foreach (var element in s.GetChildren())
-                        {
-                            if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
-                            {
-                                elements.Add(elementExpression);
-                            }
-                            else
-                            {
-                                return false;
-                            }
-                        }
-                        argumentExpression = Expression.NewArrayInit(elementType, elements);
-                        return true;
-                    }
-                    if (TryBuildCtorExpression(s, resolutionContext, out var ctorExpression) || TryBuildCtorExpression(s, type, resolutionContext, out ctorExpression))
-                    {
-                        if (ctorExpression.Type.IsValueType && !type.IsValueType)
-                        {
-                            argumentExpression = Expression.Convert(ctorExpression, type);
-                        }
-                        else
-                        {
-                            argumentExpression = ctorExpression;
-                        }
-                        return true;
-                    }
-                    if (IsContainer(type, out elementType))
-                    {
-                        if (IsConstructableDictionary(type, elementType, out var concreteType, out var keyType, out var valueType, out var addMethod))
-                        {
-                            var elements = new List<ElementInit>();
-                            foreach (var element in s.GetChildren())
-                            {
-                                if (TryBindToCtorArgument(element, valueType, resolutionContext, out var elementExpression))
-                                {
-                                    var key = new StringArgumentValue(element.Key).ConvertTo(keyType, resolutionContext);
-                                    elements.Add(Expression.ElementInit(addMethod, Expression.Constant(key, keyType), elementExpression));
-                                }
-                                else
-                                {
-                                    return false;
-                                }
-                            }
-                            argumentExpression = Expression.ListInit(Expression.New(concreteType), elements);
-                            return true;
-                        }
-                        if (IsConstructableContainer(type, elementType, out concreteType, out addMethod))
-                        {
-                            var elements = new List<Expression>();
-                            foreach (var element in s.GetChildren())
-                            {
-                                if (TryBindToCtorArgument(element, elementType, resolutionContext, out var elementExpression))
-                                {
-                                    elements.Add(elementExpression);
-                                }
-                                else
-                                {
-                                    return false;
-                                }
-                            }
-                            argumentExpression = Expression.ListInit(Expression.New(concreteType), addMethod, elements);
-                            return true;
-                        }
-                    }
-
-                    return false;
-                }
-            }
-
-            argumentExpression = Expression.Constant(value, type);
-            return true;
-        }
     }
 
     static bool IsContainer(Type type, [NotNullWhen(true)] out Type? elementType)
